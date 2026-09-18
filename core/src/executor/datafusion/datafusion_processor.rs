@@ -49,7 +49,8 @@ use crate::file_selection::FileGroup;
 pub const SYS_HIDDEN_SEQ_NUM: &str = "sys_hidden_seq_num";
 pub const SYS_HIDDEN_FILE_PATH: &str = "sys_hidden_file_path";
 pub const SYS_HIDDEN_POS: &str = "sys_hidden_pos";
-const SYS_HIDDEN_COLS: [&str; 3] = [SYS_HIDDEN_SEQ_NUM, SYS_HIDDEN_FILE_PATH, SYS_HIDDEN_POS];
+pub(crate) const SYS_HIDDEN_COLS: [&str; 3] =
+    [SYS_HIDDEN_SEQ_NUM, SYS_HIDDEN_FILE_PATH, SYS_HIDDEN_POS];
 
 /// `DataFusion` processor for Iceberg compaction with merge-on-read optimization
 pub struct DatafusionProcessor {
@@ -338,10 +339,11 @@ impl DatafusionTableRegister {
         need_seq_num: bool,
         need_file_path_and_pos: bool,
     ) -> Result<()> {
-        let schema = dictionary_encode_hidden_file_path(schema_to_arrow_schema(schema)?);
+        let arrow_schema = dictionary_encode_hidden_file_path(schema_to_arrow_schema(schema)?);
         let data_file_table_provider = IcebergFileScanTaskTableProvider::new(
             file_scan_tasks,
-            Arc::new(schema),
+            Arc::new(arrow_schema),
+            Arc::new(schema.clone()),
             self.file_io.clone(),
             need_seq_num,
             need_file_path_and_pos,

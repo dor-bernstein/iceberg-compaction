@@ -39,11 +39,11 @@ use iceberg::arrow::ArrowReaderBuilder;
 use iceberg::expr::Predicate;
 use iceberg::io::{FileIO, FileIOBuilder};
 use iceberg::scan::FileScanTask;
-use iceberg::spec::DataContentType;
+use iceberg::spec::{DataContentType, Schema as IcebergSchema};
 use iceberg_datafusion::physical_plan::expr_to_predicate::convert_filters_to_predicate;
 use iceberg_datafusion::to_datafusion_error;
 
-use super::datafusion_processor::SYS_HIDDEN_SEQ_NUM;
+use super::datafusion_processor::{SYS_HIDDEN_COLS, SYS_HIDDEN_SEQ_NUM};
 
 struct RecordBatchBuffer {
     buffer: Vec<RecordBatch>,
@@ -162,6 +162,7 @@ impl IcebergFileTaskScan {
     pub(crate) fn new(
         file_scan_tasks: Vec<FileScanTask>,
         schema: ArrowSchemaRef,
+        iceberg_schema: Arc<IcebergSchema>,
         projection: Option<&Vec<usize>>,
         filters: &[Expr],
         file_io: &FileIO,
@@ -180,16 +181,32 @@ impl IcebergFileTaskScan {
             file_scan_tasks
                 .into_iter()
                 .map(|mut task| {
-                    let project_field_ids = projection
-                        .iter()
-                        .filter_map(|name| task.schema().field_id_by_name(name))
-                        .collect::<Vec<_>>();
+                    // Resolve against the table schema, NOT `task.schema()`. A FileScanTask
+                    // carries the schema of the snapshot it was planned from, and
+                    // `ADD COLUMN` is metadata-only -- it creates no snapshot -- so until
+                    // the table's next write that schema still lacks the new column.
+                    // Resolving here dropped it from the projection, and the writer, which
+                    // holds the current schema, then failed with
+                    // `Field id N not found in struct array`. Keeping it lets
+                    // `RecordBatchTransformer` null-fill it for files written before it.
+                    let mut fields = Vec::with_capacity(projection.len());
+                    let mut project_field_ids = Vec::with_capacity(projection.len());
+                    for name in projection {
+                        // `sys_hidden_*` are synthesised from the scan task after the read
+                        // (`add_seq_num_into_batch` / `add_file_path_pos_into_batch`) and
+                        // belong to no file's schema, so they must stay out of the
+                        // projection -- asking for their ids would request columns no
+                        // Parquet file can supply.
+                        if SYS_HIDDEN_COLS.contains(&name.as_str()) {
+                            continue;
+                        }
+                        if let Some(field) = iceberg_schema.field_by_name(name) {
+                            project_field_ids.push(field.id);
+                            fields.push(field.clone());
+                        }
+                    }
                     let new_schema = iceberg::spec::Schema::builder()
-                        .with_fields(
-                            projection
-                                .iter()
-                                .filter_map(|name| task.schema().field_by_name(name).cloned()),
-                        )
+                        .with_fields(fields)
                         .build()
                         .map_err(to_datafusion_error)?;
                     task.schema = Arc::new(new_schema);
@@ -745,9 +762,11 @@ mod tests {
     use std::sync::Arc;
 
     use datafusion::arrow::datatypes::{DataType as ArrowDataType, SchemaBuilder};
+    use iceberg::arrow::schema_to_arrow_schema;
     use iceberg::scan::FileScanTask;
-    use iceberg::spec::{DataContentType, Schema};
+    use iceberg::spec::{DataContentType, NestedField, PrimitiveType, Schema, Type};
 
+    use super::super::datafusion_processor::{SYS_HIDDEN_FILE_PATH, SYS_HIDDEN_POS};
     use super::*;
 
     fn create_file_scan_task(length: u64, file_id: u64) -> FileScanTask {
@@ -1306,6 +1325,160 @@ mod tests {
         assert_ne!(
             generate_memory_path("s3://bucket/path/to/file.parquet"),
             "s3://bucket/path/to/file.parquet"
+        );
+    }
+
+    /// A table whose latest snapshot predates an `ADD COLUMN` still reports the *old*
+    /// schema through `FileScanTask::schema()`, because `ADD COLUMN` is metadata-only and
+    /// creates no snapshot. The projection must still carry the new column so the reader
+    /// null-fills it; dropping it here makes the writer fail with
+    /// `Field id N not found in struct array`.
+    #[test]
+    fn test_projection_keeps_column_absent_from_stale_task_schema() {
+        // Current table schema: three fields, `deleted_at` added by the latest ADD COLUMN.
+        let current_schema = Schema::builder()
+            .with_fields(vec![
+                Arc::new(NestedField::required(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Long),
+                )),
+                Arc::new(NestedField::optional(
+                    2,
+                    "name",
+                    Type::Primitive(PrimitiveType::String),
+                )),
+                Arc::new(NestedField::optional(
+                    3,
+                    "deleted_at",
+                    Type::Primitive(PrimitiveType::Timestamptz),
+                )),
+            ])
+            .build()
+            .unwrap();
+
+        // The snapshot the scan planned against: no field 3.
+        let stale_snapshot_schema = Schema::builder()
+            .with_fields(vec![
+                Arc::new(NestedField::required(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Long),
+                )),
+                Arc::new(NestedField::optional(
+                    2,
+                    "name",
+                    Type::Primitive(PrimitiveType::String),
+                )),
+            ])
+            .build()
+            .unwrap();
+
+        let mut task = create_file_scan_task(100, 1);
+        task.schema = Arc::new(stale_snapshot_schema);
+
+        let declared = Arc::new(schema_to_arrow_schema(&current_schema).unwrap());
+        let file_io = FileIOBuilder::new_fs_io().build().unwrap();
+
+        let scan = IcebergFileTaskScan::new(
+            vec![task],
+            declared,
+            Arc::new(current_schema),
+            Some(&vec![0, 1, 2]),
+            &[],
+            &file_io,
+            false,
+            false,
+            1,
+            1024,
+            false,
+        )
+        .unwrap();
+
+        let projected = &scan.file_scan_tasks_group[0][0];
+
+        assert_eq!(
+            projected.project_field_ids,
+            vec![1, 2, 3],
+            "field 3 must stay projected so the reader null-fills it for files that predate it"
+        );
+        assert!(
+            projected.schema.field_by_id(3).is_some(),
+            "task schema must carry field 3, or RecordBatchTransformer cannot resolve it"
+        );
+    }
+
+    /// The synthetic merge-on-read columns are never present in any file's schema, so they
+    /// must keep being skipped. This is what stops the fix above from projecting
+    /// `sys_hidden_*` field ids that no Parquet file can satisfy.
+    #[test]
+    fn test_projection_skips_synthetic_hidden_columns() {
+        let current_schema = Schema::builder()
+            .with_fields(vec![Arc::new(NestedField::required(
+                1,
+                "id",
+                Type::Primitive(PrimitiveType::Long),
+            ))])
+            .build()
+            .unwrap();
+
+        // What `DataFusionTaskContextBuilder::build` registers for the data-file provider:
+        // the table schema plus the hidden columns used by the anti-join.
+        let declared_with_hidden = Schema::builder()
+            .with_fields(vec![
+                Arc::new(NestedField::required(
+                    1,
+                    "id",
+                    Type::Primitive(PrimitiveType::Long),
+                )),
+                Arc::new(NestedField::optional(
+                    2,
+                    SYS_HIDDEN_FILE_PATH,
+                    Type::Primitive(PrimitiveType::String),
+                )),
+                Arc::new(NestedField::optional(
+                    3,
+                    SYS_HIDDEN_POS,
+                    Type::Primitive(PrimitiveType::Long),
+                )),
+            ])
+            .build()
+            .unwrap();
+
+        let mut task = create_file_scan_task(100, 1);
+        task.schema = Arc::new(current_schema);
+
+        let declared = Arc::new(schema_to_arrow_schema(&declared_with_hidden).unwrap());
+        let file_io = FileIOBuilder::new_fs_io().build().unwrap();
+
+        let scan = IcebergFileTaskScan::new(
+            vec![task],
+            declared,
+            Arc::new(declared_with_hidden),
+            Some(&vec![0, 1, 2]),
+            &[],
+            &file_io,
+            false,
+            true,
+            1,
+            1024,
+            false,
+        )
+        .unwrap();
+
+        let projected = &scan.file_scan_tasks_group[0][0];
+
+        assert_eq!(
+            projected.project_field_ids,
+            vec![1],
+            "only the real column may be projected; sys_hidden_* are synthesised after the read"
+        );
+        assert!(
+            projected
+                .schema
+                .field_by_name(SYS_HIDDEN_FILE_PATH)
+                .is_none(),
+            "sys_hidden_file_path must not enter the task schema"
         );
     }
 }

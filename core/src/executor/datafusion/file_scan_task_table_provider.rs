@@ -26,6 +26,7 @@ use datafusion::logical_expr::{Expr, TableProviderFilterPushDown};
 use datafusion::physical_plan::ExecutionPlan;
 use iceberg::io::FileIO;
 use iceberg::scan::FileScanTask;
+use iceberg::spec::Schema as IcebergSchema;
 
 use super::iceberg_file_task_scan::IcebergFileTaskScan;
 
@@ -34,6 +35,9 @@ use super::iceberg_file_task_scan::IcebergFileTaskScan;
 pub struct IcebergFileScanTaskTableProvider {
     file_scan_tasks: Vec<FileScanTask>,
     schema: ArrowSchemaRef,
+    /// The Iceberg schema `schema` was derived from. Projection names are resolved against
+    /// this rather than against each task's own (possibly stale) snapshot schema.
+    iceberg_schema: Arc<IcebergSchema>,
     file_io: FileIO,
     need_seq_num: bool,
     need_file_path_and_pos: bool,
@@ -46,6 +50,7 @@ impl IcebergFileScanTaskTableProvider {
     pub fn new(
         file_scan_tasks: Vec<FileScanTask>,
         schema: ArrowSchemaRef,
+        iceberg_schema: Arc<IcebergSchema>,
         file_io: FileIO,
         need_seq_num: bool,
         need_file_path_and_pos: bool,
@@ -56,6 +61,7 @@ impl IcebergFileScanTaskTableProvider {
         Self {
             file_scan_tasks,
             schema,
+            iceberg_schema,
             file_io,
             need_seq_num,
             need_file_path_and_pos,
@@ -93,6 +99,7 @@ impl TableProvider for IcebergFileScanTaskTableProvider {
         Ok(Arc::new(IcebergFileTaskScan::new(
             self.file_scan_tasks.clone(),
             self.schema.clone(),
+            self.iceberg_schema.clone(),
             projection,
             filters,
             &self.file_io,
