@@ -982,7 +982,11 @@ impl CommitManager {
 
                 let txn = Transaction::new(&table);
 
-                // TODO: support validation of data files and delete files with starting snapshot before applying the rewrite
+                // `validate_from_snapshot` refuses the commit when a snapshot after the planning one
+                // added a delete that applies to a removed data file. It runs inside
+                // `Transaction::commit` on every rebase, against the exact head the commit is
+                // conditioned on, so it also covers writes that land after this reload. It fails
+                // with `PreconditionFailed`, which the retry predicate below does not match.
                 let rewrite_action = if use_starting_sequence_number {
                     // TODO: avoid retry if the snapshot_id is not found
                     if let Some(snapshot) = table.metadata().snapshot_by_id(starting_snapshot_id) {
@@ -993,7 +997,8 @@ impl CommitManager {
                             .delete_files(delete_files)
                             .set_target_branch(to_branch.to_owned())
                             .set_new_data_file_sequence_number(snapshot.sequence_number())
-                            .set_check_file_existence(true);
+                            .set_check_file_existence(true)
+                            .validate_from_snapshot(starting_snapshot_id);
                         action.set_snapshot_properties(custom_snapshot_properties(snapshot));
                         action
                     } else {
@@ -1011,7 +1016,8 @@ impl CommitManager {
                         .add_data_files(data_files)
                         .delete_files(delete_files)
                         .set_target_branch(to_branch.to_owned())
-                        .set_check_file_existence(true);
+                        .set_check_file_existence(true)
+                        .validate_from_snapshot(starting_snapshot_id);
                     if let Some(snapshot) = table.metadata().snapshot_for_ref(to_branch) {
                         action.set_snapshot_properties(custom_snapshot_properties(snapshot));
                     }
@@ -1100,7 +1106,11 @@ impl CommitManager {
 
                 let txn = Transaction::new(&table);
 
-                // TODO: support validation of data files and delete files with starting snapshot before applying the rewrite
+                // `validate_from_snapshot` refuses the commit when a snapshot after the planning one
+                // added a delete that applies to a removed data file. It runs inside
+                // `Transaction::commit` on every rebase, against the exact head the commit is
+                // conditioned on, so it also covers writes that land after this reload. It fails
+                // with `PreconditionFailed`, which the retry predicate below does not match.
                 let overwrite_action = if use_starting_sequence_number {
                     // TODO: avoid retry if the snapshot_id is not found
                     if let Some(snapshot) = table.metadata().snapshot_by_id(starting_snapshot_id) {
@@ -1110,7 +1120,8 @@ impl CommitManager {
                             .delete_files(delete_files)
                             .set_target_branch(to_branch.to_owned())
                             .set_new_data_file_sequence_number(snapshot.sequence_number())
-                            .set_check_file_existence(true);
+                            .set_check_file_existence(true)
+                            .validate_from_snapshot(starting_snapshot_id);
                         action.set_snapshot_properties(custom_snapshot_properties(snapshot));
                         action
                     } else {
@@ -1127,7 +1138,8 @@ impl CommitManager {
                         .add_data_files(data_files)
                         .delete_files(delete_files)
                         .set_target_branch(to_branch.to_owned())
-                        .set_check_file_existence(true);
+                        .set_check_file_existence(true)
+                        .validate_from_snapshot(starting_snapshot_id);
                     if let Some(snapshot) = table.metadata().snapshot_for_ref(to_branch) {
                         action.set_snapshot_properties(custom_snapshot_properties(snapshot));
                     }
@@ -1389,9 +1401,10 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::CompactionError;
     // Additional imports for new tests
     use crate::compaction::{CommitManagerRetryConfig, CompactionPlan, RewriteResult};
-    use crate::compaction::{CompactionBuilder, CompactionPlanner};
+    use crate::compaction::{Compaction, CompactionBuilder, CompactionPlanner};
     use crate::config::{
         CompactionConfigBuilder, CompactionExecutionConfigBuilder, CompactionPlanningConfig,
         SmallFilesConfigBuilder,
@@ -2103,6 +2116,111 @@ mod tests {
             .unwrap();
 
         assert_compaction_stats(&result.stats, initial_file_count, false);
+    }
+
+    /// A position delete naming `data_file`, committed the way another writer would: a snapshot
+    /// that adds only the delete file. The file itself is never read.
+    async fn commit_concurrent_position_delete(
+        catalog: &MemoryCatalog,
+        table_ident: &TableIdent,
+        data_file: &str,
+    ) -> Table {
+        let table = catalog.load_table(table_ident).await.unwrap();
+        let delete = iceberg::spec::DataFileBuilder::default()
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .content(iceberg::spec::DataContentType::PositionDeletes)
+            .file_path(format!(
+                "{}/data/concurrent-delete.parquet",
+                table.metadata().location()
+            ))
+            .file_format(iceberg::spec::DataFileFormat::Parquet)
+            .file_size_in_bytes(100)
+            .record_count(1)
+            .partition(iceberg::spec::Struct::empty())
+            .referenced_data_file(Some(data_file.to_owned()))
+            .build()
+            .unwrap();
+        let txn = Transaction::new(&table);
+        let txn = txn
+            .rewrite_files()
+            .add_data_files([delete])
+            .apply(txn)
+            .unwrap();
+        txn.commit(catalog).await.unwrap()
+    }
+
+    /// Plans and rewrites every data file of a fresh two-file table, returning the result
+    /// uncommitted.
+    async fn rewrite_uncommitted(env: &TestEnv) -> (Compaction, RewriteResult) {
+        let data_files = write_simple_files(&env.table, &env.warehouse_location, "race", 2).await;
+        let table = append_and_commit(&env.table, env.catalog.as_ref(), data_files).await;
+        let config = CompactionConfigBuilder::default()
+            .planning(CompactionPlanningConfig::Full(
+                crate::config::FullCompactionConfig::default(),
+            ))
+            .build()
+            .unwrap();
+        let compaction = CompactionBuilder::new(env.catalog.clone(), env.table_ident.clone())
+            .with_config(Arc::new(config))
+            .build();
+        let planner = CompactionPlanner::new(compaction.config.as_ref().unwrap().planning.clone());
+        let plan = planner.plan_compaction(&table).await.unwrap().remove(0);
+        let result = compaction
+            .rewrite_plan(plan, &compaction.config.as_ref().unwrap().execution, &table)
+            .await
+            .unwrap();
+        (compaction, result)
+    }
+
+    /// The race the commit validation exists for: another writer deletes a row from an input
+    /// file between planning and commit. Committing would replace that file with one that still
+    /// holds the row and strand the delete, so the commit must fail -- once, not after retries --
+    /// and leave the table as the other writer left it.
+    #[tokio::test]
+    async fn test_commit_refuses_a_delete_committed_after_planning() {
+        let env = create_test_env().await;
+        let (compaction, result) = rewrite_uncommitted(&env).await;
+        let input = result.plan.file_group.data_files[0].data_file_path.clone();
+
+        let after_delete =
+            commit_concurrent_position_delete(env.catalog.as_ref(), &env.table_ident, &input).await;
+
+        let err = compaction
+            .commit_rewrite_results(vec![result])
+            .await
+            .expect_err("a rewrite racing a delete on its input must not commit");
+        match &err {
+            CompactionError::Iceberg(e) => {
+                assert_eq!(e.kind(), iceberg::ErrorKind::PreconditionFailed, "{e}");
+                assert!(e.message().contains(&input), "{e}");
+            }
+            other => panic!("expected the iceberg validation error, got {other:?}"),
+        }
+        let now = env.catalog.load_table(&env.table_ident).await.unwrap();
+        assert_eq!(
+            now.metadata().current_snapshot_id(),
+            after_delete.metadata().current_snapshot_id(),
+            "the refused rewrite must not have committed"
+        );
+    }
+
+    /// A delete on a file the plan did not read cannot have changed what it rewrote.
+    #[tokio::test]
+    async fn test_commit_allows_a_delete_on_a_file_outside_the_plan() {
+        let env = create_test_env().await;
+        let (compaction, result) = rewrite_uncommitted(&env).await;
+
+        let table = env.catalog.load_table(&env.table_ident).await.unwrap();
+        let later = write_simple_files(&table, &env.warehouse_location, "later", 1).await;
+        let later_path = later[0].file_path().to_owned();
+        append_and_commit(&table, env.catalog.as_ref(), later).await;
+        commit_concurrent_position_delete(env.catalog.as_ref(), &env.table_ident, &later_path)
+            .await;
+
+        compaction
+            .commit_rewrite_results(vec![result])
+            .await
+            .unwrap();
     }
 
     /// Test `compact_with_plan` with empty plan (merged from `test_compact_with_plan_empty` an`test_compact_no_files`es)

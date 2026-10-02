@@ -68,3 +68,13 @@ str_to_string = "warn"
 large_enum_variant = "allow"
 # TODO: this makes sense, but it's too noisy for now (2025-03-10)
 result_large_err = "allow"
+
+# `CommitManager` calls `validate_from_snapshot`, which only the Clutch fork of iceberg-rust has
+# (dor-bernstein/iceberg-rust-apache-fork, branch fix/rewrite-validate-from-snapshot, on top of
+# ee489f56 -- the rev pinned above). A [patch] applies only in the root workspace, so a consumer
+# that depends on this crate must carry the same redirect (nitro's integrations/iceberg-rust does).
+[patch."https://github.com/risingwavelabs/iceberg-rust.git"]
+iceberg = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "5e07be4a85044c74f7703e35cabfc827e6d289c3" }
+iceberg-catalog-glue = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "5e07be4a85044c74f7703e35cabfc827e6d289c3" }
+iceberg-catalog-rest = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "5e07be4a85044c74f7703e35cabfc827e6d289c3" }
+iceberg-datafusion = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "5e07be4a85044c74f7703e35cabfc827e6d289c3" }
