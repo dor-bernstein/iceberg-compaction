@@ -74,7 +74,7 @@ result_large_err = "allow"
 # ee489f56 -- the rev pinned above). A [patch] applies only in the root workspace, so a consumer
 # that depends on this crate must carry the same redirect (nitro's integrations/iceberg-rust does).
 [patch."https://github.com/risingwavelabs/iceberg-rust.git"]
-iceberg = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "5e07be4a85044c74f7703e35cabfc827e6d289c3" }
-iceberg-catalog-glue = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "5e07be4a85044c74f7703e35cabfc827e6d289c3" }
-iceberg-catalog-rest = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "5e07be4a85044c74f7703e35cabfc827e6d289c3" }
-iceberg-datafusion = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "5e07be4a85044c74f7703e35cabfc827e6d289c3" }
+iceberg = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "a36a115bb44ae44825538e17e0492dc8e7159ee0" }
+iceberg-catalog-glue = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "a36a115bb44ae44825538e17e0492dc8e7159ee0" }
+iceberg-catalog-rest = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "a36a115bb44ae44825538e17e0492dc8e7159ee0" }
+iceberg-datafusion = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "a36a115bb44ae44825538e17e0492dc8e7159ee0" }
