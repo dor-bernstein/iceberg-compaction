@@ -70,11 +70,11 @@ large_enum_variant = "allow"
 result_large_err = "allow"
 
 # `CommitManager` calls `validate_from_snapshot`, which only the Clutch fork of iceberg-rust has
-# (dor-bernstein/iceberg-rust-apache-fork, branch fix/rewrite-validate-from-snapshot, on top of
-# ee489f56 -- the rev pinned above). A [patch] applies only in the root workspace, so a consumer
+# (dor-bernstein/iceberg-rust-apache-fork, branch fix/nested-null-fill, on top of ee489f56 -- the
+# rev pinned above). It refuses a rewrite on a concurrent delete OR a concurrent removal of an input. A [patch] applies only in the root workspace, so a consumer
 # that depends on this crate must carry the same redirect (nitro's integrations/iceberg-rust does).
 [patch."https://github.com/risingwavelabs/iceberg-rust.git"]
-iceberg = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "0e37e9bb0a4ee3f367721b67c584b6b179b07cbd" }
-iceberg-catalog-glue = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "0e37e9bb0a4ee3f367721b67c584b6b179b07cbd" }
-iceberg-catalog-rest = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "0e37e9bb0a4ee3f367721b67c584b6b179b07cbd" }
-iceberg-datafusion = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "0e37e9bb0a4ee3f367721b67c584b6b179b07cbd" }
+iceberg = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "d5805bbd635dad24757b10cf2a0691907fb88168" }
+iceberg-catalog-glue = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "d5805bbd635dad24757b10cf2a0691907fb88168" }
+iceberg-catalog-rest = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "d5805bbd635dad24757b10cf2a0691907fb88168" }
+iceberg-datafusion = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "d5805bbd635dad24757b10cf2a0691907fb88168" }
