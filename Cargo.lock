@@ -2824,7 +2824,7 @@ dependencies = [
 [[package]]
 name = "iceberg"
 version = "0.8.0"
-source = "git+https://github.com/dor-bernstein/iceberg-rust-apache-fork?rev=d5805bbd635dad24757b10cf2a0691907fb88168#d5805bbd635dad24757b10cf2a0691907fb88168"
+source = "git+https://github.com/dor-bernstein/iceberg-rust-apache-fork?rev=1687e512186986ca8511dc6d8c615473a76d36a6#1687e512186986ca8511dc6d8c615473a76d36a6"
 dependencies = [
  "anyhow",
  "apache-avro",
@@ -2883,7 +2883,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-glue"
 version = "0.8.0"
-source = "git+https://github.com/dor-bernstein/iceberg-rust-apache-fork?rev=d5805bbd635dad24757b10cf2a0691907fb88168#d5805bbd635dad24757b10cf2a0691907fb88168"
+source = "git+https://github.com/dor-bernstein/iceberg-rust-apache-fork?rev=1687e512186986ca8511dc6d8c615473a76d36a6#1687e512186986ca8511dc6d8c615473a76d36a6"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2898,7 +2898,7 @@ dependencies = [
 [[package]]
 name = "iceberg-catalog-rest"
 version = "0.8.0"
-source = "git+https://github.com/dor-bernstein/iceberg-rust-apache-fork?rev=d5805bbd635dad24757b10cf2a0691907fb88168#d5805bbd635dad24757b10cf2a0691907fb88168"
+source = "git+https://github.com/dor-bernstein/iceberg-rust-apache-fork?rev=1687e512186986ca8511dc6d8c615473a76d36a6#1687e512186986ca8511dc6d8c615473a76d36a6"
 dependencies = [
  "async-trait",
  "base64",
@@ -2984,7 +2984,7 @@ dependencies = [
 [[package]]
 name = "iceberg-datafusion"
 version = "0.8.0"
-source = "git+https://github.com/dor-bernstein/iceberg-rust-apache-fork?rev=d5805bbd635dad24757b10cf2a0691907fb88168#d5805bbd635dad24757b10cf2a0691907fb88168"
+source = "git+https://github.com/dor-bernstein/iceberg-rust-apache-fork?rev=1687e512186986ca8511dc6d8c615473a76d36a6#1687e512186986ca8511dc6d8c615473a76d36a6"
 dependencies = [
  "anyhow",
  "async-trait",

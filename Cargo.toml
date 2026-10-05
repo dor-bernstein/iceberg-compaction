@@ -74,7 +74,7 @@ result_large_err = "allow"
 # rev pinned above). It refuses a rewrite on a concurrent delete OR a concurrent removal of an input. A [patch] applies only in the root workspace, so a consumer
 # that depends on this crate must carry the same redirect (nitro's integrations/iceberg-rust does).
 [patch."https://github.com/risingwavelabs/iceberg-rust.git"]
-iceberg = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "d5805bbd635dad24757b10cf2a0691907fb88168" }
-iceberg-catalog-glue = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "d5805bbd635dad24757b10cf2a0691907fb88168" }
-iceberg-catalog-rest = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "d5805bbd635dad24757b10cf2a0691907fb88168" }
-iceberg-datafusion = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "d5805bbd635dad24757b10cf2a0691907fb88168" }
+iceberg = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "1687e512186986ca8511dc6d8c615473a76d36a6" }
+iceberg-catalog-glue = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "1687e512186986ca8511dc6d8c615473a76d36a6" }
+iceberg-catalog-rest = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "1687e512186986ca8511dc6d8c615473a76d36a6" }
+iceberg-datafusion = { git = "https://github.com/dor-bernstein/iceberg-rust-apache-fork", rev = "1687e512186986ca8511dc6d8c615473a76d36a6" }
