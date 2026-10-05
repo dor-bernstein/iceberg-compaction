@@ -473,6 +473,38 @@ impl Compaction {
         &self,
         rewrite_results: Vec<RewriteResult>,
     ) -> Result<Table> {
+        self.commit_rewrite_results_inner(rewrite_results, None)
+            .await
+    }
+
+    /// [`Self::commit_rewrite_results`], validating only the snapshots after `validated_through`
+    /// for deletes on the rewritten files, instead of every snapshot since planning.
+    ///
+    /// For a caller that has already judged the snapshots between planning and
+    /// `validated_through` itself, more precisely than the commit can: the commit's check must
+    /// treat a position delete without `file_path` bounds (`DuckDB` writes those) as applying to
+    /// every rewritten file, so without this a single such delete anywhere since planning refuses
+    /// every commit of the pass. Everything up to `validated_through` is the caller's
+    /// responsibility; the planning snapshot still supplies the new files' sequence number.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::commit_rewrite_results`]; additionally fails when `validated_through` is not an
+    /// ancestor of the branch head at commit time.
+    pub async fn commit_rewrite_results_validated_from(
+        &self,
+        rewrite_results: Vec<RewriteResult>,
+        validated_through: i64,
+    ) -> Result<Table> {
+        self.commit_rewrite_results_inner(rewrite_results, Some(validated_through))
+            .await
+    }
+
+    async fn commit_rewrite_results_inner(
+        &self,
+        rewrite_results: Vec<RewriteResult>,
+        validated_through: Option<i64>,
+    ) -> Result<Table> {
         if rewrite_results.is_empty() {
             return Err(CompactionError::Execution(
                 "No rewrite results to commit".to_owned(),
@@ -502,6 +534,10 @@ impl Compaction {
                 self.metrics.clone(),
                 consistency_params,
             );
+            let commit_manager = match validated_through {
+                Some(id) => commit_manager.with_validate_from_snapshot(id),
+                None => commit_manager,
+            };
 
             // Delegate to CommitManager's high-level interface
             commit_manager
@@ -796,6 +832,9 @@ pub struct CommitManager {
     metrics_recorder: CompactionMetricsRecorder,
     /// Schema ID for validation
     basic_schema_id: i32,
+    /// Snapshot after which the commit validates new deletes against the rewritten files;
+    /// `starting_snapshot_id` unless [`Self::with_validate_from_snapshot`] moves it later.
+    validate_from_snapshot_id: i64,
 }
 
 /// Parameters for commit consistency validation.
@@ -834,7 +873,15 @@ impl CommitManager {
             use_starting_sequence_number: consistency_params.use_starting_sequence_number,
             metrics_recorder,
             basic_schema_id: consistency_params.basic_schema_id,
+            validate_from_snapshot_id: consistency_params.starting_snapshot_id,
         }
+    }
+
+    /// Validate new deletes only from after `snapshot_id` instead of the starting snapshot. See
+    /// [`Compaction::commit_rewrite_results_validated_from`].
+    pub fn with_validate_from_snapshot(mut self, snapshot_id: i64) -> Self {
+        self.validate_from_snapshot_id = snapshot_id;
+        self
     }
 
     /// Collects added and rewritten files from rewrite results by loading snapshot.
@@ -963,6 +1010,7 @@ impl CommitManager {
             let delete_files = delete_files.clone();
             let use_starting_sequence_number = self.use_starting_sequence_number;
             let starting_snapshot_id = self.starting_snapshot_id;
+            let validate_from_snapshot_id = self.validate_from_snapshot_id;
             let metrics_recorder = self.metrics_recorder.clone();
 
             async move {
@@ -982,7 +1030,12 @@ impl CommitManager {
 
                 let txn = Transaction::new(&table);
 
-                // TODO: support validation of data files and delete files with starting snapshot before applying the rewrite
+                // `validate_from_snapshot` refuses the commit when a snapshot after the planning one
+                // (or after the caller's `validated_through`) added a delete that applies to a
+                // removed data file. It runs inside
+                // `Transaction::commit` on every rebase, against the exact head the commit is
+                // conditioned on, so it also covers writes that land after this reload. It fails
+                // with `PreconditionFailed`, which the retry predicate below does not match.
                 let rewrite_action = if use_starting_sequence_number {
                     // TODO: avoid retry if the snapshot_id is not found
                     if let Some(snapshot) = table.metadata().snapshot_by_id(starting_snapshot_id) {
@@ -993,7 +1046,8 @@ impl CommitManager {
                             .delete_files(delete_files)
                             .set_target_branch(to_branch.to_owned())
                             .set_new_data_file_sequence_number(snapshot.sequence_number())
-                            .set_check_file_existence(true);
+                            .set_check_file_existence(true)
+                            .validate_from_snapshot(validate_from_snapshot_id);
                         action.set_snapshot_properties(custom_snapshot_properties(snapshot));
                         action
                     } else {
@@ -1011,7 +1065,8 @@ impl CommitManager {
                         .add_data_files(data_files)
                         .delete_files(delete_files)
                         .set_target_branch(to_branch.to_owned())
-                        .set_check_file_existence(true);
+                        .set_check_file_existence(true)
+                        .validate_from_snapshot(validate_from_snapshot_id);
                     if let Some(snapshot) = table.metadata().snapshot_for_ref(to_branch) {
                         action.set_snapshot_properties(custom_snapshot_properties(snapshot));
                     }
@@ -1081,6 +1136,7 @@ impl CommitManager {
             let delete_files = delete_files.clone();
             let use_starting_sequence_number = self.use_starting_sequence_number;
             let starting_snapshot_id = self.starting_snapshot_id;
+            let validate_from_snapshot_id = self.validate_from_snapshot_id;
             let metrics_recorder = self.metrics_recorder.clone();
 
             async move {
@@ -1100,7 +1156,12 @@ impl CommitManager {
 
                 let txn = Transaction::new(&table);
 
-                // TODO: support validation of data files and delete files with starting snapshot before applying the rewrite
+                // `validate_from_snapshot` refuses the commit when a snapshot after the planning one
+                // (or after the caller's `validated_through`) added a delete that applies to a
+                // removed data file. It runs inside
+                // `Transaction::commit` on every rebase, against the exact head the commit is
+                // conditioned on, so it also covers writes that land after this reload. It fails
+                // with `PreconditionFailed`, which the retry predicate below does not match.
                 let overwrite_action = if use_starting_sequence_number {
                     // TODO: avoid retry if the snapshot_id is not found
                     if let Some(snapshot) = table.metadata().snapshot_by_id(starting_snapshot_id) {
@@ -1110,7 +1171,8 @@ impl CommitManager {
                             .delete_files(delete_files)
                             .set_target_branch(to_branch.to_owned())
                             .set_new_data_file_sequence_number(snapshot.sequence_number())
-                            .set_check_file_existence(true);
+                            .set_check_file_existence(true)
+                            .validate_from_snapshot(validate_from_snapshot_id);
                         action.set_snapshot_properties(custom_snapshot_properties(snapshot));
                         action
                     } else {
@@ -1127,7 +1189,8 @@ impl CommitManager {
                         .add_data_files(data_files)
                         .delete_files(delete_files)
                         .set_target_branch(to_branch.to_owned())
-                        .set_check_file_existence(true);
+                        .set_check_file_existence(true)
+                        .validate_from_snapshot(validate_from_snapshot_id);
                     if let Some(snapshot) = table.metadata().snapshot_for_ref(to_branch) {
                         action.set_snapshot_properties(custom_snapshot_properties(snapshot));
                     }
@@ -1389,9 +1452,10 @@ mod tests {
     use tempfile::TempDir;
     use uuid::Uuid;
 
+    use crate::CompactionError;
     // Additional imports for new tests
     use crate::compaction::{CommitManagerRetryConfig, CompactionPlan, RewriteResult};
-    use crate::compaction::{CompactionBuilder, CompactionPlanner};
+    use crate::compaction::{Compaction, CompactionBuilder, CompactionPlanner};
     use crate::config::{
         CompactionConfigBuilder, CompactionExecutionConfigBuilder, CompactionPlanningConfig,
         SmallFilesConfigBuilder,
@@ -2103,6 +2167,151 @@ mod tests {
             .unwrap();
 
         assert_compaction_stats(&result.stats, initial_file_count, false);
+    }
+
+    /// A position delete committed the way another writer would: a snapshot that adds only the
+    /// delete file. `Some(path)` names its data file; `None` leaves it unplaceable from metadata,
+    /// as `DuckDB`'s MERGE writes them. The file itself is never read.
+    async fn commit_concurrent_position_delete(
+        catalog: &MemoryCatalog,
+        table_ident: &TableIdent,
+        data_file: Option<&str>,
+    ) -> Table {
+        let table = catalog.load_table(table_ident).await.unwrap();
+        let delete = iceberg::spec::DataFileBuilder::default()
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .content(iceberg::spec::DataContentType::PositionDeletes)
+            .file_path(format!(
+                "{}/data/concurrent-delete.parquet",
+                table.metadata().location()
+            ))
+            .file_format(iceberg::spec::DataFileFormat::Parquet)
+            .file_size_in_bytes(100)
+            .record_count(1)
+            .partition(iceberg::spec::Struct::empty())
+            .referenced_data_file(data_file.map(str::to_owned))
+            .build()
+            .unwrap();
+        let txn = Transaction::new(&table);
+        let txn = txn
+            .rewrite_files()
+            .add_data_files([delete])
+            .apply(txn)
+            .unwrap();
+        txn.commit(catalog).await.unwrap()
+    }
+
+    /// Plans and rewrites every data file of a fresh two-file table, returning the result
+    /// uncommitted.
+    async fn rewrite_uncommitted(env: &TestEnv) -> (Compaction, RewriteResult) {
+        let data_files = write_simple_files(&env.table, &env.warehouse_location, "race", 2).await;
+        let table = append_and_commit(&env.table, env.catalog.as_ref(), data_files).await;
+        let config = CompactionConfigBuilder::default()
+            .planning(CompactionPlanningConfig::Full(
+                crate::config::FullCompactionConfig::default(),
+            ))
+            .build()
+            .unwrap();
+        let compaction = CompactionBuilder::new(env.catalog.clone(), env.table_ident.clone())
+            .with_config(Arc::new(config))
+            .build();
+        let planner = CompactionPlanner::new(compaction.config.as_ref().unwrap().planning.clone());
+        let plan = planner.plan_compaction(&table).await.unwrap().remove(0);
+        let result = compaction
+            .rewrite_plan(plan, &compaction.config.as_ref().unwrap().execution, &table)
+            .await
+            .unwrap();
+        (compaction, result)
+    }
+
+    /// The race the commit validation exists for: another writer deletes a row from an input
+    /// file between planning and commit. Committing would replace that file with one that still
+    /// holds the row and strand the delete, so the commit must fail -- once, not after retries --
+    /// and leave the table as the other writer left it.
+    #[tokio::test]
+    async fn test_commit_refuses_a_delete_committed_after_planning() {
+        let env = create_test_env().await;
+        let (compaction, result) = rewrite_uncommitted(&env).await;
+        let input = result.plan.file_group.data_files[0].data_file_path.clone();
+
+        let after_delete =
+            commit_concurrent_position_delete(env.catalog.as_ref(), &env.table_ident, Some(&input))
+                .await;
+
+        let err = compaction
+            .commit_rewrite_results(vec![result])
+            .await
+            .expect_err("a rewrite racing a delete on its input must not commit");
+        match &err {
+            CompactionError::Iceberg(e) => {
+                assert_eq!(
+                    iceberg::transaction::rewrite_validation_failure(e),
+                    Some(iceberg::transaction::RewriteValidationFailure::ConcurrentDeletes),
+                    "{e}"
+                );
+                let scheme_less = input.split_once("://").map_or(input.as_str(), |(_, p)| p);
+                assert!(e.message().contains(scheme_less), "{e}");
+            }
+            other => panic!("expected the iceberg validation error, got {other:?}"),
+        }
+        let now = env.catalog.load_table(&env.table_ident).await.unwrap();
+        assert_eq!(
+            now.metadata().current_snapshot_id(),
+            after_delete.metadata().current_snapshot_id(),
+            "the refused rewrite must not have committed"
+        );
+    }
+
+    /// A delete on a file the plan did not read cannot have changed what it rewrote.
+    #[tokio::test]
+    async fn test_commit_allows_a_delete_on_a_file_outside_the_plan() {
+        let env = create_test_env().await;
+        let (compaction, result) = rewrite_uncommitted(&env).await;
+
+        let table = env.catalog.load_table(&env.table_ident).await.unwrap();
+        let later = write_simple_files(&table, &env.warehouse_location, "later", 1).await;
+        let later_path = later[0].file_path().to_owned();
+        append_and_commit(&table, env.catalog.as_ref(), later).await;
+        commit_concurrent_position_delete(
+            env.catalog.as_ref(),
+            &env.table_ident,
+            Some(&later_path),
+        )
+        .await;
+
+        compaction
+            .commit_rewrite_results(vec![result])
+            .await
+            .unwrap();
+    }
+
+    /// A bounds-less delete (`DuckDB`'s shape) cannot be placed from metadata, so the commit alone
+    /// must refuse it. A caller that read it and knows it misses every input validates from after
+    /// it, and the commit goes through -- with the planning snapshot still the starting one.
+    #[tokio::test]
+    async fn test_validated_from_skips_snapshots_the_caller_judged() {
+        let env = create_test_env().await;
+        let (compaction, result) = rewrite_uncommitted(&env).await;
+
+        let after_delete =
+            commit_concurrent_position_delete(env.catalog.as_ref(), &env.table_ident, None).await;
+        let judged_head = after_delete.metadata().current_snapshot_id().unwrap();
+
+        let err = compaction
+            .commit_rewrite_results(vec![result.clone()])
+            .await
+            .expect_err("an unplaceable delete since planning must refuse");
+        assert!(
+            matches!(&err, CompactionError::Iceberg(e)
+                if iceberg::transaction::rewrite_validation_failure(e)
+                    == Some(iceberg::transaction::RewriteValidationFailure::ConcurrentDeletes)),
+            "{err:?}"
+        );
+
+        compaction
+            .commit_rewrite_results_validated_from(vec![result], judged_head)
+            .await
+            .unwrap();
     }
 
     /// Test `compact_with_plan` with empty plan (merged from `test_compact_with_plan_empty` an`test_compact_no_files`es)
