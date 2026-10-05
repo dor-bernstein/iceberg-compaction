@@ -1032,7 +1032,7 @@ impl CommitManager {
 
                 // `validate_from_snapshot` refuses the commit when a snapshot after the planning one
                 // (or after the caller's `validated_through`) added a delete that applies to a
-                // removed data file. It runs inside
+                // removed data file, or removed one itself. It runs inside
                 // `Transaction::commit` on every rebase, against the exact head the commit is
                 // conditioned on, so it also covers writes that land after this reload. It fails
                 // with `PreconditionFailed`, which the retry predicate below does not match.
@@ -1158,7 +1158,7 @@ impl CommitManager {
 
                 // `validate_from_snapshot` refuses the commit when a snapshot after the planning one
                 // (or after the caller's `validated_through`) added a delete that applies to a
-                // removed data file. It runs inside
+                // removed data file, or removed one itself. It runs inside
                 // `Transaction::commit` on every rebase, against the exact head the commit is
                 // conditioned on, so it also covers writes that land after this reload. It fails
                 // with `PreconditionFailed`, which the retry predicate below does not match.
@@ -2222,6 +2222,74 @@ mod tests {
             .await
             .unwrap();
         (compaction, result)
+    }
+
+    /// The `DataFile` at the branch head whose path is `path`.
+    async fn data_file_at_head(table: &Table, path: &str) -> DataFile {
+        let snapshot = table.metadata().current_snapshot().unwrap();
+        let list = snapshot
+            .load_manifest_list(table.file_io(), table.metadata())
+            .await
+            .unwrap();
+        for manifest_file in list.entries() {
+            let manifest = manifest_file.load_manifest(table.file_io()).await.unwrap();
+            for entry in manifest.entries() {
+                if entry.is_alive() && entry.data_file().file_path() == path {
+                    return entry.data_file().clone();
+                }
+            }
+        }
+        panic!("{path} is not live at the head");
+    }
+
+    /// Another compaction replaces an input between rewrite and commit. The commit must fail as the
+    /// typed `ConcurrentRemoval` -- not as `check_file_existence`'s `DataInvalid`, which the retry
+    /// predicate matches -- and fail once: it returns before the first retry's 1 s backoff could
+    /// elapse, and leaves the head where the other compaction put it.
+    #[tokio::test]
+    async fn test_commit_refuses_an_input_another_compaction_removed_without_retrying() {
+        let env = create_test_env().await;
+        let (compaction, result) = rewrite_uncommitted(&env).await;
+        let input = result.plan.file_group.data_files[0].data_file_path.clone();
+
+        let table = env.catalog.load_table(&env.table_ident).await.unwrap();
+        let removed = data_file_at_head(&table, &input).await;
+        let replacement = write_simple_files(&table, &env.warehouse_location, "other", 1).await;
+        let txn = Transaction::new(&table);
+        let txn = txn
+            .rewrite_files()
+            .add_data_files(replacement)
+            .delete_files([removed])
+            .apply(txn)
+            .unwrap();
+        let after_removal = txn.commit(env.catalog.as_ref()).await.unwrap();
+
+        let started = std::time::Instant::now();
+        let err = compaction
+            .commit_rewrite_results(vec![result])
+            .await
+            .expect_err("a rewrite of an input another compaction removed must not commit");
+        assert!(
+            started.elapsed() < CommitManagerRetryConfig::default().retry_initial_delay,
+            "the conflict was retried: {:?}",
+            started.elapsed()
+        );
+        match &err {
+            CompactionError::Iceberg(e) => {
+                assert_eq!(
+                    iceberg::transaction::rewrite_validation_failure(e),
+                    Some(iceberg::transaction::RewriteValidationFailure::ConcurrentRemoval),
+                    "{e}"
+                );
+            }
+            other => panic!("expected the iceberg validation error, got {other:?}"),
+        }
+        let now = env.catalog.load_table(&env.table_ident).await.unwrap();
+        assert_eq!(
+            now.metadata().current_snapshot_id(),
+            after_removal.metadata().current_snapshot_id(),
+            "the refused rewrite must not have committed"
+        );
     }
 
     /// The race the commit validation exists for: another writer deletes a row from an input
